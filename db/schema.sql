@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS courses (
   title TEXT NOT NULL,
   description TEXT,
   status TEXT NOT NULL DEFAULT 'draft',
+  has_code_editor BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -91,3 +92,9 @@ CREATE TABLE IF NOT EXISTS student_profile (
 
 CREATE INDEX IF NOT EXISTS idx_topics_lesson ON lesson_topics(lesson_id);
 CREATE INDEX IF NOT EXISTS idx_mastery_user ON concept_mastery(user_id);
+
+-- Per-course toggle: whether the AI tutor is allowed to hand out in-browser
+-- coding exercises for this course (e.g. on for "Intro to Transformers",
+-- off for "Intro to Cooking"). Added via ALTER so it also applies to
+-- databases where the courses table already existed before this column did.
+ALTER TABLE courses ADD COLUMN IF NOT EXISTS has_code_editor BOOLEAN NOT NULL DEFAULT false;

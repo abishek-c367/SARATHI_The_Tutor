@@ -81,6 +81,16 @@ function systemPromptFor(course, lesson, topics, masteryMap, profile) {
     ? topics.map((t, i) => `${i + 1}. [id: ${t.id}] ${t.title} - status: ${masteryMap[t.id] || 'not_started'}`).join('\n')
     : '(No topic checklist defined for this lesson - teach the material as a single flowing topic.)';
 
+  const codeExerciseTeachingLine = course.hasCodeEditor
+    ? `- When it suits the material, give the student a hands-on coding exercise (see the \`\`\`exercise format below) instead of just a quiz - this is especially good for programming-related lessons.`
+    : `- This course does NOT involve writing code, so never assign a hands-on coding exercise - use quizzes, examples, and diagrams instead to check understanding.`;
+
+  const exerciseFormatBlock = course.hasCodeEditor
+    ? `- Coding exercises the student should write/run themselves: fence with \`\`\`exercise ... \`\`\` containing ONLY JSON:
+  {"language": "python" or "javascript", "prompt": "what to implement", "starterCode": "..."}
+  (Only use "python" or "javascript" for exercises - those are the two the student can actually run.)`
+    : `- The in-browser code editor is disabled for this course - NEVER output a \`\`\`exercise fenced block, even if the student pastes code themselves or asks for a coding challenge. Explain concepts and, if genuinely useful, show a short read-only code snippet in a normal fenced code block instead.`;
+
   return `You are an expert, patient AI tutor teaching one lesson inside the course "${course.title}".
 Lesson: "${lesson.title}"
 Source material for this lesson (teach from this; do not go far outside its scope):
@@ -100,7 +110,7 @@ Teaching style:
 - Keep each turn focused: roughly 120-350 words of explanation, plus at most one supporting code block, diagram, quiz, or exercise.
 - Check understanding with a short quiz before advancing a topic, and adapt based on the answer.
 - Include a code example when it helps, and a Mermaid diagram when the material describes a structure, process, or relationship.
-- When it suits the material, give the student a hands-on coding exercise (see the \`\`\`exercise format below) instead of just a quiz - this is especially good for programming-related lessons.
+${codeExerciseTeachingLine}
 - Adjust your depth and pace to the student's level and notes above. If notes mention a specific confusion or preference, act on it.
 - When every topic is mastered/practiced, clearly say the lesson is complete and summarize key takeaways.
 
@@ -109,9 +119,7 @@ OUTPUT FORMAT (strict):
 - Code shown for reading: fence with the language, e.g. \`\`\`python ... \`\`\`
 - Diagrams: fence with \`\`\`mermaid ... \`\`\` using valid Mermaid syntax.
 - Quizzes: fence with \`\`\`quiz ... \`\`\` containing ONLY JSON: {"question": "...", "options": ["...","...","...","..."], "correctIndex": 0, "explanation": "..."}
-- Coding exercises the student should write/run themselves: fence with \`\`\`exercise ... \`\`\` containing ONLY JSON:
-  {"language": "python" or "javascript", "prompt": "what to implement", "starterCode": "..."}
-  (Only use "python" or "javascript" for exercises - those are the two the student can actually run.)
+${exerciseFormatBlock}
 - At the END of every reply, include exactly one hidden state-update block (the student never sees this) fenced as \`\`\`meta ... \`\`\` containing ONLY JSON:
   {"topicId": "<id of the topic you just addressed, or null>", "topicStatus": "introduced|practiced|struggling|mastered|null", "level": "beginner|intermediate|advanced|null", "profileNote": "<a short new observation about this student to remember, or null>"}
   Use topic ids EXACTLY as given in the checklist above. Only set profileNote when you've actually learned something new and specific about how this student learns; otherwise use null. Always include this block, even if all fields are null.`;
@@ -120,7 +128,7 @@ OUTPUT FORMAT (strict):
 async function loadLessonAndCourse(lessonId) {
   const result = await db.query(
     `SELECT l.id AS lesson_id, l.title AS lesson_title, l.content AS lesson_content,
-            c.id AS course_id, c.title AS course_title
+            c.id AS course_id, c.title AS course_title, c.has_code_editor AS course_has_code_editor
      FROM lessons l JOIN modules m ON m.id = l.module_id JOIN courses c ON c.id = m.course_id
      WHERE l.id = $1`,
     [lessonId]
@@ -129,7 +137,7 @@ async function loadLessonAndCourse(lessonId) {
   if (!row) return null;
   return {
     lesson: { id: row.lesson_id, title: row.lesson_title, content: row.lesson_content },
-    course: { id: row.course_id, title: row.course_title },
+    course: { id: row.course_id, title: row.course_title, hasCodeEditor: !!row.course_has_code_editor },
   };
 }
 
@@ -246,6 +254,7 @@ router.post('/lessons/:lessonId/code-result', requireAuth, async (req, res) => {
     const found = await assertAccess(req, res, req.params.lessonId);
     if (!found) return;
     const { lesson, course } = found;
+    if (!course.hasCodeEditor) return res.status(403).json({ error: 'The code editor is not enabled for this course.' });
     const { language, code, stdout, stderr } = req.body || {};
     if (!code) return res.status(400).json({ error: 'No code provided.' });
 

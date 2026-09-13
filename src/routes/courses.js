@@ -6,7 +6,7 @@ const { callLLM } = require('../utils/llm');
 const router = express.Router();
 
 function courseRow(r) {
-  return { id: r.id, title: r.title, description: r.description, status: r.status, createdAt: r.created_at };
+  return { id: r.id, title: r.title, description: r.description, status: r.status, hasCodeEditor: !!r.has_code_editor, createdAt: r.created_at };
 }
 function moduleRow(r) { return { id: r.id, title: r.title, order: r.order }; }
 function lessonRow(r) { return { id: r.id, title: r.title, content: r.content, order: r.order }; }
@@ -46,12 +46,12 @@ router.get('/:id', requireAuth, async (req, res, next) => {
 
 router.post('/', requireAuth, requireAdmin, async (req, res, next) => {
   try {
-    const { title, description } = req.body || {};
+    const { title, description, hasCodeEditor } = req.body || {};
     if (!title) return res.status(400).json({ error: 'Title is required.' });
     const id = db.genId('course');
     const result = await db.query(
-      'INSERT INTO courses (id, title, description) VALUES ($1,$2,$3) RETURNING *',
-      [id, title, description || '']
+      'INSERT INTO courses (id, title, description, has_code_editor) VALUES ($1,$2,$3,$4) RETURNING *',
+      [id, title, description || '', !!hasCodeEditor]
     );
     res.json({ course: courseRow(result.rows[0]) });
   } catch (e) { next(e); }
@@ -59,17 +59,18 @@ router.post('/', requireAuth, requireAdmin, async (req, res, next) => {
 
 router.patch('/:id', requireAuth, requireAdmin, async (req, res, next) => {
   try {
-    const { title, description, status } = req.body || {};
+    const { title, description, status, hasCodeEditor } = req.body || {};
     const existing = await db.query('SELECT * FROM courses WHERE id = $1', [req.params.id]);
     if (!existing.rows[0]) return res.status(404).json({ error: 'Course not found.' });
     const merged = {
       title: title !== undefined ? title : existing.rows[0].title,
       description: description !== undefined ? description : existing.rows[0].description,
       status: status !== undefined ? (status === 'published' ? 'published' : 'draft') : existing.rows[0].status,
+      hasCodeEditor: hasCodeEditor !== undefined ? !!hasCodeEditor : existing.rows[0].has_code_editor,
     };
     const result = await db.query(
-      'UPDATE courses SET title=$1, description=$2, status=$3 WHERE id=$4 RETURNING *',
-      [merged.title, merged.description, merged.status, req.params.id]
+      'UPDATE courses SET title=$1, description=$2, status=$3, has_code_editor=$4 WHERE id=$5 RETURNING *',
+      [merged.title, merged.description, merged.status, merged.hasCodeEditor, req.params.id]
     );
     res.json({ course: courseRow(result.rows[0]) });
   } catch (e) { next(e); }

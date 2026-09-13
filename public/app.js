@@ -104,6 +104,7 @@ const state = {
   chat: [],
   busy: false,
   toast: null,
+  courseHasCodeEditor: false,
 };
 function setState(patch){ Object.assign(state, patch); render(); }
 function showToast(msg){ state.toast = msg; render(); setTimeout(()=>{ state.toast=null; render(); }, 2600); }
@@ -136,7 +137,7 @@ function mdBlock(text){
   return html;
 }
 let diagramCounter = 0;
-function renderRich(text){
+function renderRich(text, allowExercise){
   const parts = text.split(/```(\w+)?\n([\s\S]*?)```/g);
   let html = '';
   const pending = [];
@@ -151,7 +152,11 @@ function renderRich(text){
     } else if(lang === 'meta'){
       // hidden state-update block for the server - never shown to the student
     } else if(lang === 'exercise'){
-      html += renderExerciseBlock(code);
+      // Safety net: only render a runnable exercise if this course actually
+      // has the in-browser code editor enabled (set by the admin per course).
+      // The tutor is instructed not to emit these otherwise, but we don't
+      // trust the model's output alone for a UI-affecting decision.
+      if(allowExercise) html += renderExerciseBlock(code);
     } else if(lang === 'mermaid'){
       const id = 'mmd_' + (++diagramCounter);
       pending.push({id, code});
@@ -405,7 +410,7 @@ async function renderAdminHome(el){
       cardsHtml += `
       <div class="card">
         <div class="card-row">
-          <div><p class="card-title">${escapeHtml(c.title)}</p><p class="card-meta">${lessonCount} lesson${lessonCount===1?'':'s'} &middot; ${c.status==='published' ? 'Published' : 'Draft'}</p></div>
+          <div><p class="card-title">${escapeHtml(c.title)}</p><p class="card-meta">${lessonCount} lesson${lessonCount===1?'':'s'} &middot; ${c.status==='published' ? 'Published' : 'Draft'}${c.hasCodeEditor ? ' &middot; Code editor enabled' : ''}</p></div>
           <div style="display:flex;gap:8px;">
             <button class="btn btn-sm" onclick="openCourse('${c.id}')">Edit</button>
             <button class="btn btn-sm btn-danger" onclick="removeCourse('${c.id}')">Delete</button>
@@ -437,6 +442,13 @@ function openNewCourseModal(){
       <h2>New course</h2>
       <div class="field"><label>Title</label><input id="ncTitle" placeholder="e.g. Introduction to Linear Algebra" /></div>
       <div class="field"><label>Description</label><textarea id="ncDesc" rows="3" placeholder="What will students learn?"></textarea></div>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0;">
+          <input type="checkbox" id="ncCodeEditor" style="width:auto;" />
+          <span>Enable in-browser code editor for this course</span>
+        </label>
+        <p class="card-meta" style="margin-top:6px;">Turn this on for programming/technical courses (e.g. Transformers, Python). Leave it off for non-coding courses (e.g. Cooking) so the tutor never offers coding exercises.</p>
+      </div>
       <div class="modal-actions"><button class="btn" id="ncCancel">Cancel</button><button class="btn btn-primary" id="ncCreate">Create course</button></div>
     </div>`;
   document.body.appendChild(backdrop);
@@ -444,9 +456,10 @@ function openNewCourseModal(){
   backdrop.querySelector('#ncCreate').onclick = async ()=>{
     const title = backdrop.querySelector('#ncTitle').value.trim();
     const description = backdrop.querySelector('#ncDesc').value.trim();
+    const hasCodeEditor = backdrop.querySelector('#ncCodeEditor').checked;
     if(!title) return;
     try{
-      const { course } = await api('/courses', { method:'POST', body:{ title, description } });
+      const { course } = await api('/courses', { method:'POST', body:{ title, description, hasCodeEditor } });
       backdrop.remove();
       setState({ view:'courseEditor', courseId: course.id });
     }catch(e){ showToast(e.message); }
@@ -487,7 +500,8 @@ async function renderCourseEditor(el){
       <button class="linklike" onclick="setState({view:'adminHome',courseId:null})" style="margin-bottom:14px;">&larr; All courses</button>
       <div class="flexbetween">
         <div><h1 class="page-title">${escapeHtml(course.title)}</h1><p class="page-sub">${escapeHtml(course.description||'')}</p></div>
-        <div style="display:flex;gap:8px;">
+        <div style="display:flex;gap:8px;align-items:center;">
+          ${course.hasCodeEditor ? '<span class="pill">Code editor enabled</span>' : ''}
           <button class="btn" onclick="editCourseMeta()">Edit details</button>
           <button class="btn ${course.status==='published'?'':'btn-primary'}" onclick="togglePublish('${course.status}')">${course.status==='published' ? 'Unpublish' : 'Publish'}</button>
         </div>
@@ -512,6 +526,13 @@ window.editCourseMeta = async ()=>{
       <h2>Edit course details</h2>
       <div class="field"><label>Title</label><input id="ecTitle" value="${escapeHtml(course.title)}" /></div>
       <div class="field"><label>Description</label><textarea id="ecDesc" rows="3">${escapeHtml(course.description||'')}</textarea></div>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0;">
+          <input type="checkbox" id="ecCodeEditor" style="width:auto;" ${course.hasCodeEditor ? 'checked' : ''} />
+          <span>Enable in-browser code editor for this course</span>
+        </label>
+        <p class="card-meta" style="margin-top:6px;">Turn this on for programming/technical courses (e.g. Transformers, Python). Leave it off for non-coding courses (e.g. Cooking) so the tutor never offers coding exercises.</p>
+      </div>
       <div class="modal-actions"><button class="btn" id="ecCancel">Cancel</button><button class="btn btn-primary" id="ecSave">Save</button></div>
     </div>`;
   document.body.appendChild(backdrop);
@@ -519,7 +540,8 @@ window.editCourseMeta = async ()=>{
   backdrop.querySelector('#ecSave').onclick = async ()=>{
     const title = backdrop.querySelector('#ecTitle').value.trim();
     const description = backdrop.querySelector('#ecDesc').value.trim();
-    try{ await api('/courses/'+state.courseId, {method:'PATCH', body:{title, description}}); backdrop.remove(); render(); }
+    const hasCodeEditor = backdrop.querySelector('#ecCodeEditor').checked;
+    try{ await api('/courses/'+state.courseId, {method:'PATCH', body:{title, description, hasCodeEditor}}); backdrop.remove(); render(); }
     catch(e){ showToast(e.message); }
   };
 };
@@ -722,7 +744,7 @@ async function renderStudentHome(el){
           <div style="flex:1;">
             <p class="card-title">${escapeHtml(c.title)}</p>
             <p class="card-meta">${escapeHtml(c.description||'')}</p>
-            <p class="card-meta">${lessonCount} lesson${lessonCount===1?'':'s'}</p>
+            <p class="card-meta">${lessonCount} lesson${lessonCount===1?'':'s'}${c.hasCodeEditor ? ' &middot; Includes in-browser code editor' : ''}</p>
             ${isEnrolled ? `<div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>` : ''}
           </div>
           <button class="btn ${isEnrolled?'':'btn-primary'}" onclick="${isEnrolled ? `openStudentCourse('${c.id}')` : `enrollAndOpen('${c.id}')`}">${isEnrolled ? 'Continue' : 'Enroll'}</button>
@@ -780,6 +802,7 @@ async function renderLessonView(el){
   }catch(e){ el.innerHTML = '<div class="wrap">'+escapeHtml(e.message)+'</div>'; return; }
   if(!lesson){ el.innerHTML = '<div class="wrap">Lesson not found.</div>'; return; }
 
+  state.courseHasCodeEditor = !!course.hasCodeEditor;
   resetSandboxWorker(); // fresh sandbox per lesson visit
 
   el.innerHTML = `
@@ -858,7 +881,7 @@ function renderChatMessages(){
     if(m.role === 'user'){
       html += `<div class="msg-row user"><div class="bubble-user">${mdInline(m.content)}</div></div>`;
     } else {
-      const {html:rich, pending} = renderRich(m.content);
+      const {html:rich, pending} = renderRich(m.content, state.courseHasCodeEditor);
       allPending = allPending.concat(pending);
       html += `<div class="msg-row"><div class="bubble-tutor">${rich}</div></div>`;
     }

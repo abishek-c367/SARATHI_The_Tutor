@@ -118,6 +118,39 @@ scripts/seed.js       demo admin/student/course
 public/               the frontend (plain HTML/CSS/JS, no build step)
 ```
 
+## What's new: structured teaching, student memory, live code
+
+**Topic-by-topic teaching.** Each lesson can have an ordered checklist of
+topics (chapter → lesson → topic). In the admin lesson editor, click
+"Generate with AI" to draft a checklist from the lesson content, or type
+one topic per line yourself. The tutor teaches the checklist in order and
+won't move on until a topic is "practiced" or "mastered" — the student sees
+live progress in a sidebar next to the chat.
+
+**Per-student memory.** Every student has a profile (a level, plus a short
+running note the tutor maintains about how they learn) that persists
+*across every course they take* — not just within one lesson. The tutor
+updates this itself as it teaches, via a hidden instruction embedded at the
+end of each of its replies (stripped out before the student ever sees it).
+This is what lets the tutor adapt pacing and style to a specific student
+over time, not just react to the current message.
+
+**Live, runnable code.** When a lesson calls for it, the tutor can hand the
+student a coding exercise with a real editor. Code actually executes —
+Python via [Pyodide](https://pyodide.org) (a full CPython interpreter
+compiled to WebAssembly) and JavaScript via a sandboxed Web Worker — both
+entirely in the student's browser. Nothing is sent to your server to be
+executed, which sidesteps the security risk of running untrusted code
+server-side, and it costs you nothing no matter how much students use it.
+After running, the code and its real output are sent back to the tutor,
+which reviews it and gives feedback.
+
+Caveats on this part: only Python and JavaScript are supported (no
+external packages beyond what each runtime ships with); the first Python
+run in a session takes ~5-10 seconds to load the interpreter; and a
+runaway infinite loop is caught by a 12-second timeout that resets the
+sandbox, but will briefly look "stuck" until then.
+
 ## Notes / honest limitations
 - No code execution sandbox: code blocks the tutor writes are shown, not run.
 - File upload extraction is basic (plain text read, or `pdf-parse` for PDFs) —

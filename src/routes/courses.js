@@ -140,6 +140,47 @@ router.delete('/lessons/:lessonId', requireAuth, requireAdmin, async (req, res, 
   } catch (e) { next(e); }
 });
 
+// ---- Topics: the ordered concept checklist the tutor teaches through ----
+router.get('/lessons/:lessonId/topics', requireAuth, async (req, res, next) => {
+  try {
+    const result = await db.query('SELECT * FROM lesson_topics WHERE lesson_id = $1 ORDER BY "order" ASC', [req.params.lessonId]);
+    res.json({ topics: result.rows.map((r) => ({ id: r.id, title: r.title, order: r.order })) });
+  } catch (e) { next(e); }
+});
+
+// Replaces the full topic list for a lesson (used after admin reviews an AI proposal, or edits manually)
+router.put('/lessons/:lessonId/topics', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { titles } = req.body || {}; // array of strings, in order
+    if (!Array.isArray(titles)) return res.status(400).json({ error: 'titles must be an array.' });
+    await db.query('DELETE FROM lesson_topics WHERE lesson_id = $1', [req.params.lessonId]);
+    let order = 0;
+    for (const title of titles) {
+      const t = (title || '').trim();
+      if (!t) continue;
+      await db.query('INSERT INTO lesson_topics (id, lesson_id, title, "order") VALUES ($1,$2,$3,$4)', [db.genId('topic'), req.params.lessonId, t, order++]);
+    }
+    const result = await db.query('SELECT * FROM lesson_topics WHERE lesson_id = $1 ORDER BY "order" ASC', [req.params.lessonId]);
+    res.json({ topics: result.rows.map((r) => ({ id: r.id, title: r.title, order: r.order })) });
+  } catch (e) { next(e); }
+});
+
+// AI proposes a topic checklist from the lesson's content - admin reviews before saving via PUT above
+router.post('/lessons/:lessonId/generate-topics', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const lessonRes = await db.query('SELECT * FROM lessons WHERE id = $1', [req.params.lessonId]);
+    const lesson = lessonRes.rows[0];
+    if (!lesson) return res.status(404).json({ error: 'Lesson not found.' });
+    const system = `Break the given lesson content into an ordered checklist of 3-7 distinct teachable concepts (topics), each small enough to teach and check understanding of in a few chat turns. Respond with ONLY valid JSON, no prose: {"topics": ["...", "...", ...]}. Order them the way they should be taught (foundational ideas first).`;
+    const text = await callLLM({ system, messages: [{ role: 'user', content: lesson.content }], maxTokens: 800 });
+    const cleaned = text.replace(/^```json\s*|```$/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+    res.json({ topics: parsed.topics || [] });
+  } catch (e) {
+    res.status(502).json({ error: 'Could not generate topics: ' + e.message });
+  }
+});
+
 // ---- AI-assisted outline generation (proposal only, not saved) ----
 router.post('/:id/generate-outline', requireAuth, requireAdmin, async (req, res) => {
   const { rawText } = req.body || {};

@@ -26,6 +26,74 @@ async function api(path, opts){
 }
 
 /* =========================================================================
+   CODE SANDBOX (runs entirely in the browser - nothing sent to our server)
+   - JavaScript: a sandboxed Web Worker (isolated from the page's DOM/cookies).
+   - Python: Pyodide (real CPython compiled to WebAssembly) loaded lazily,
+     also inside a Worker so an infinite loop can be terminated on timeout
+     instead of freezing the tab.
+========================================================================= */
+const WORKER_SOURCE = `
+let pyodideInstance = null;
+async function ensurePyodide() {
+  if (pyodideInstance) return pyodideInstance;
+  self.importScripts('https://cdn.jsdelivr.net/pyodide/v0.27.6/full/pyodide.js');
+  pyodideInstance = await self.loadPyodide({ indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.27.6/full/' });
+  return pyodideInstance;
+}
+self.onmessage = async (e) => {
+  const { language, code, jobId } = e.data;
+  let stdout = '', stderr = '';
+  try {
+    if (language === 'python') {
+      const pyodide = await ensurePyodide();
+      pyodide.setStdout({ batched: (s) => { stdout += s + '\\n'; } });
+      pyodide.setStderr({ batched: (s) => { stderr += s + '\\n'; } });
+      await pyodide.runPythonAsync(code);
+    } else {
+      const logs = [];
+      const fakeConsole = { log: (...a) => logs.push(a.map(String).join(' ')), error: (...a) => logs.push(a.map(String).join(' ')) };
+      const fn = new Function('console', code);
+      fn(fakeConsole);
+      stdout = logs.join('\\n');
+    }
+    self.postMessage({ jobId, ok: true, stdout, stderr });
+  } catch (err) {
+    self.postMessage({ jobId, ok: true, stdout, stderr: (stderr ? stderr + '\\n' : '') + String(err) });
+  }
+};
+`;
+let sandboxWorker = null;
+let jobCounter = 0;
+function getSandboxWorker() {
+  if (sandboxWorker) return sandboxWorker;
+  const blob = new Blob([WORKER_SOURCE], { type: 'application/javascript' });
+  sandboxWorker = new Worker(URL.createObjectURL(blob));
+  return sandboxWorker;
+}
+function resetSandboxWorker() {
+  if (sandboxWorker) { sandboxWorker.terminate(); sandboxWorker = null; }
+}
+function runInSandbox(language, code, timeoutMs){
+  timeoutMs = timeoutMs || 12000;
+  return new Promise((resolve) => {
+    const worker = getSandboxWorker();
+    const jobId = ++jobCounter;
+    const timer = setTimeout(() => {
+      resetSandboxWorker();
+      resolve({ ok: false, stdout: '', stderr: 'Execution timed out (possible infinite loop). The sandbox has been reset.' });
+    }, timeoutMs);
+    const handler = (e) => {
+      if (e.data.jobId !== jobId) return;
+      clearTimeout(timer);
+      worker.removeEventListener('message', handler);
+      resolve(e.data);
+    };
+    worker.addEventListener('message', handler);
+    worker.postMessage({ language, code, jobId });
+  });
+}
+
+/* =========================================================================
    APP STATE
 ========================================================================= */
 const state = {
@@ -80,6 +148,10 @@ function renderRich(text){
     if(code === undefined) continue;
     if(lang === 'quiz'){
       html += renderQuizBlock(code);
+    } else if(lang === 'meta'){
+      // hidden state-update block for the server - never shown to the student
+    } else if(lang === 'exercise'){
+      html += renderExerciseBlock(code);
     } else if(lang === 'mermaid'){
       const id = 'mmd_' + (++diagramCounter);
       pending.push({id, code});
@@ -119,6 +191,58 @@ function renderPendingDiagrams(pending){
 }
 if(window.mermaid){ window.mermaid.initialize({ startOnLoad:false, theme:'default' }); }
 
+let exerciseCounter = 0;
+const exerciseRegistry = {};
+function renderExerciseBlock(jsonStr){
+  let ex;
+  try{ ex = JSON.parse(jsonStr.trim()); } catch(e){ return '<div class="quiz-box">Could not load exercise.</div>'; }
+  const lang = (ex.language === 'python') ? 'python' : 'javascript';
+  const eid = 'ex_' + (++exerciseCounter);
+  exerciseRegistry[eid] = ex;
+  return `
+  <div class="exercise-box" id="${eid}_box">
+    <div class="exercise-prompt">${mdInline(ex.prompt||'Coding exercise')}</div>
+    <div class="exercise-lang">${lang}</div>
+    <textarea class="exercise-editor" id="${eid}_code" spellcheck="false">${escapeHtml(ex.starterCode||'')}</textarea>
+    <div class="exercise-actions">
+      <button class="btn btn-sm" id="${eid}_run" onclick="runExercise('${eid}')">Run &amp; check with tutor</button>
+      <span class="exercise-status" id="${eid}_status"></span>
+    </div>
+    <pre class="exercise-output" id="${eid}_output" style="display:none;"></pre>
+  </div>`;
+}
+window.runExercise = async function(eid){
+  const ex = exerciseRegistry[eid];
+  const codeEl = document.getElementById(eid+'_code');
+  const statusEl = document.getElementById(eid+'_status');
+  const outEl = document.getElementById(eid+'_output');
+  const runBtn = document.getElementById(eid+'_run');
+  const code = codeEl.value;
+  const lang = (ex.language === 'python') ? 'python' : 'javascript';
+
+  runBtn.disabled = true;
+  statusEl.textContent = lang==='python' ? 'Starting Python (first run loads the interpreter, ~10s)\u2026' : 'Running\u2026';
+  outEl.style.display = 'block';
+  outEl.textContent = '';
+
+  const result = await runInSandbox(lang, code);
+  outEl.textContent = (result.stdout || '') + (result.stderr ? '\n' + result.stderr : '') || '(no output)';
+  statusEl.textContent = 'Sending to tutor for feedback\u2026';
+
+  setBusy(true); renderChatMessages();
+  try{
+    const { reply } = await api('/tutor/lessons/'+state.lessonId+'/code-result', {
+      method:'POST', body:{ language: lang, code, stdout: result.stdout, stderr: result.stderr }
+    });
+    state.chat.push({ role:'assistant', content: reply });
+  }catch(e){
+    state.chat.push({ role:'assistant', content: '_Could not reach the tutor: '+e.message+'_' });
+  }
+  setBusy(false); renderChatMessages(); refreshTopicSidebar();
+  statusEl.textContent = '';
+  runBtn.disabled = false;
+};
+
 window.answerQuiz = async function(qid, idx){
   const q = quizRegistry[qid];
   if(!q) return;
@@ -143,7 +267,7 @@ window.answerQuiz = async function(qid, idx){
   }catch(e){
     state.chat.push({ role:'assistant', content: '_Could not reach the tutor: '+e.message+'_' });
   }
-  setBusy(false); renderChatMessages();
+  setBusy(false); renderChatMessages(); refreshTopicSidebar();
 };
 
 /* =========================================================================
@@ -441,10 +565,34 @@ async function openLessonModal(moduleId, lessonId){
         <input type="file" id="lsFile" accept=".txt,.md,.pdf" />
         <div id="lsFileStatus" style="font-size:12.5px;color:var(--pale-dim);margin-top:6px;"></div>
       </div>
+      ${existing ? `
+      <div class="field">
+        <div class="flexbetween"><label style="margin:0;">Topic checklist (one per line, taught in this order)</label><button class="btn btn-sm" id="lsGenTopics" type="button">Generate with AI</button></div>
+        <textarea id="lsTopics" rows="5" placeholder="e.g.&#10;Sample spaces and events&#10;Computing probability of an event&#10;Complementary events">Loading&hellip;</textarea>
+        <div id="lsTopicsStatus" style="font-size:12.5px;color:var(--pale-dim);margin-top:6px;"></div>
+      </div>` : `<div class="banner-note">Save the lesson first, then reopen it to define a topic checklist for the tutor to teach through.</div>`}
       <div class="modal-actions"><button class="btn" id="lsCancel">Cancel</button><button class="btn btn-primary" id="lsSave">Save lesson</button></div>
     </div>`;
   document.body.appendChild(backdrop);
   backdrop.querySelector('#lsCancel').onclick = ()=> backdrop.remove();
+  if(existing){
+    api('/courses/lessons/'+existing.id+'/topics').then(({topics})=>{
+      const ta = backdrop.querySelector('#lsTopics');
+      if(ta) ta.value = topics.map(t=>t.title).join('\n');
+    }).catch(()=>{});
+    const genBtn = backdrop.querySelector('#lsGenTopics');
+    if(genBtn) genBtn.onclick = async ()=>{
+      const statusEl = backdrop.querySelector('#lsTopicsStatus');
+      statusEl.textContent = 'Drafting a topic checklist from the lesson content\u2026';
+      genBtn.disabled = true;
+      try{
+        const { topics } = await api('/courses/lessons/'+existing.id+'/generate-topics', { method:'POST' });
+        backdrop.querySelector('#lsTopics').value = topics.join('\n');
+        statusEl.textContent = 'Review below, edit as needed, then Save lesson to store it.';
+      }catch(e){ statusEl.textContent = 'Error: '+e.message; }
+      genBtn.disabled = false;
+    };
+  }
   backdrop.querySelector('#lsFile').onchange = async (e)=>{
     const file = e.target.files[0];
     if(!file) return;
@@ -465,8 +613,16 @@ async function openLessonModal(moduleId, lessonId){
     const content = backdrop.querySelector('#lsContent').value.trim();
     if(!title || !content) return;
     try{
-      if(existing) await api('/courses/lessons/'+existing.id, {method:'PATCH', body:{title, content}});
-      else await api('/courses/modules/'+moduleId+'/lessons', {method:'POST', body:{title, content}});
+      if(existing){
+        await api('/courses/lessons/'+existing.id, {method:'PATCH', body:{title, content}});
+        const topicsTa = backdrop.querySelector('#lsTopics');
+        if(topicsTa){
+          const titles = topicsTa.value.split('\n').map(s=>s.trim()).filter(Boolean);
+          await api('/courses/lessons/'+existing.id+'/topics', { method:'PUT', body:{titles} });
+        }
+      } else {
+        await api('/courses/modules/'+moduleId+'/lessons', {method:'POST', body:{title, content}});
+      }
       backdrop.remove();
       render();
     }catch(e){ showToast(e.message); }
@@ -624,6 +780,8 @@ async function renderLessonView(el){
   }catch(e){ el.innerHTML = '<div class="wrap">'+escapeHtml(e.message)+'</div>'; return; }
   if(!lesson){ el.innerHTML = '<div class="wrap">Lesson not found.</div>'; return; }
 
+  resetSandboxWorker(); // fresh sandbox per lesson visit
+
   el.innerHTML = `
     <div class="tutor-shell" style="height:calc(100vh - 65px);margin:-32px -40px;">
       <div class="tutor-head">
@@ -633,11 +791,16 @@ async function renderLessonView(el){
         </div>
         <button class="btn btn-sm" onclick="markCompleteManually()">Mark as complete</button>
       </div>
-      <div class="tutor-body" id="tutorBody"><div class="tutor-inner" id="tutorInner"></div></div>
-      <div class="tutor-input">
-        <div class="tutor-input-inner">
-          <textarea id="chatInput" placeholder="Ask a question, or send a blank message to begin&hellip;" rows="1"></textarea>
-          <button class="btn btn-primary" id="sendBtn">Send</button>
+      <div class="tutor-columns">
+        <div class="topic-sidebar" id="topicSidebar"><div class="side-title">Topics</div><div id="topicList">Loading&hellip;</div></div>
+        <div class="tutor-chat-col">
+          <div class="tutor-body" id="tutorBody"><div class="tutor-inner" id="tutorInner"></div></div>
+          <div class="tutor-input">
+            <div class="tutor-input-inner">
+              <textarea id="chatInput" placeholder="Ask a question, or send a blank message to begin&hellip;" rows="1"></textarea>
+              <button class="btn btn-primary" id="sendBtn">Send</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>`;
@@ -647,10 +810,12 @@ async function renderLessonView(el){
     if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); handleSend(); }
   });
 
+  refreshTopicSidebar();
+
   let messages = [];
   try{ ({messages} = await api('/tutor/lessons/'+state.lessonId+'/messages')); }catch(e){}
   state.chat = messages
-    .filter(m=>!(m.role==='user' && m.content.startsWith('[Quiz answered]')))
+    .filter(m=>!(m.role==='user' && (m.content.startsWith('[Quiz answered]') || m.content.startsWith('[Code submitted]'))))
     .map(m=>({role:m.role, content:m.content}));
   renderChatMessages();
 
@@ -662,8 +827,24 @@ async function renderLessonView(el){
     }catch(e){
       state.chat.push({ role:'assistant', content: '_The tutor could not start the lesson: '+e.message+'_' });
     }
-    setBusy(false); renderChatMessages();
+    setBusy(false); renderChatMessages(); refreshTopicSidebar();
   }
+}
+
+const STATUS_LABEL = { not_started:'Not started', introduced:'Introduced', practiced:'Practiced', struggling:'Needs review', mastered:'Mastered' };
+const STATUS_CLASS = { not_started:'', introduced:'current', practiced:'current', struggling:'struggling', mastered:'done' };
+async function refreshTopicSidebar(){
+  const listEl = document.getElementById('topicList');
+  if(!listEl) return;
+  try{
+    const { topics } = await api('/tutor/lessons/'+state.lessonId+'/progress');
+    if(!topics.length){ listEl.innerHTML = '<p class="card-meta">No topic checklist for this lesson &mdash; the tutor will teach it as one flowing session.</p>'; return; }
+    listEl.innerHTML = topics.map(t => `
+      <div class="topic-item">
+        <span class="lesson-status ${STATUS_CLASS[t.status]||''}"></span>
+        <div><div class="topic-title">${escapeHtml(t.title)}</div><div class="topic-status">${STATUS_LABEL[t.status]||t.status}</div></div>
+      </div>`).join('');
+  }catch(e){ listEl.innerHTML = ''; }
 }
 
 function setBusy(v){ state.busy = v; }
@@ -704,7 +885,7 @@ async function handleSend(){
   }catch(e){
     state.chat.push({ role:'assistant', content: '_The tutor hit a problem: '+e.message+'_' });
   }
-  setBusy(false); renderChatMessages();
+  setBusy(false); renderChatMessages(); refreshTopicSidebar();
 }
 
 window.markCompleteManually = async ()=>{

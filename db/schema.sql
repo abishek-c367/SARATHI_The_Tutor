@@ -61,3 +61,33 @@ CREATE INDEX IF NOT EXISTS idx_modules_course ON modules(course_id);
 CREATE INDEX IF NOT EXISTS idx_lessons_module ON lessons(module_id);
 CREATE INDEX IF NOT EXISTS idx_progress_user ON progress(user_id);
 CREATE INDEX IF NOT EXISTS idx_messages_user_lesson ON tutor_messages(user_id, lesson_id);
+
+-- Ordered checklist of concepts within a lesson (chapter -> lesson -> topic)
+CREATE TABLE IF NOT EXISTS lesson_topics (
+  id TEXT PRIMARY KEY,
+  lesson_id TEXT NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  "order" INT NOT NULL DEFAULT 0
+);
+
+-- Per-student mastery of each topic, updated live by the tutor as it teaches
+CREATE TABLE IF NOT EXISTS concept_mastery (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  topic_id TEXT NOT NULL REFERENCES lesson_topics(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'not_started', -- not_started | introduced | practiced | struggling | mastered
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(user_id, topic_id)
+);
+
+-- Cross-course "memory" of each student: level + a short running note the tutor
+-- maintains about how this student learns best.
+CREATE TABLE IF NOT EXISTS student_profile (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  level TEXT NOT NULL DEFAULT 'beginner', -- beginner | intermediate | advanced
+  notes TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_topics_lesson ON lesson_topics(lesson_id);
+CREATE INDEX IF NOT EXISTS idx_mastery_user ON concept_mastery(user_id);
